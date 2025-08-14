@@ -1,0 +1,37 @@
+engines:
+  web_search: serper  # serper, bing, google
+  llm_model: gpt-4-turbo-preview
+  vector_db: qdrant
+
+database:
+  url: postgresql://localhost:5432/ai_researcher
+  
+limits:
+  max_concurrent_requests: 6
+  per_claim_min_sources: 2
+  plagiarism_threshold: 0.05
+  max_sources_per_company: 60
+  script_target_words: 1600
+
+search:
+  serper_api_key: ${SERPER_API_KEY}
+  bing_api_key: ${BING_API_KEY}
+  
+llm:
+  openai_api_key: ${OPENAI_API_KEY}
+  anthropic_api_key: ${ANTHROPIC_API_KEY}
+  
+licenses:
+  allow_unsplash: true
+  allow_pexels: true
+  allow_pixabay: true
+  require_attribution: true
+  
+media:
+  unsplash_api_key: ${UNSPLASH_API_KEY}
+  pexels_api_key: ${PEXELS_API_KEY}
+  
+output:
+  base_dir: ./output
+  include_thumbnails: true
+  include_shot_list: true
