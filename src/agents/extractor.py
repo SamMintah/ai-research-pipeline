@@ -1,98 +1,103 @@
 from typing import Dict, Any, List
 import json
-from datetime import datetime
 import re
 from src.agents.base import BaseAgent
 
 class ExtractorAgent(BaseAgent):
-    """Agent for extracting facts and claims from web content"""
+    """Agent for extracting facts and claims from web content in batches."""
     
     async def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract facts from source content"""
-        content = input_data.get("content", "")
-        source_url = input_data.get("source_url", "")
+        """Extracts facts from a batch of source documents."""
+        sources = input_data.get("sources", [])
         company_name = input_data.get("company_name", "")
         
-        if not content:
-            return {"claims": [], "error": "No content provided"}
+        if not sources:
+            return {"claims": [], "error": "No sources provided"}
         
-        # Extract claims using LLM
-        claims = await self._extract_claims(content, company_name, source_url)
+        # Extract claims from the batch of sources
+        claims = await self._extract_claims_from_batch(sources, company_name)
         
-        # Extract dates and entities
+        # Enhance claims with entities and parsed dates
         enhanced_claims = []
         for claim in claims:
-            enhanced_claim = await self._enhance_claim(claim, content)
+            # The content needed for enhancement is not readily available here.
+            # We will simplify the enhancement for now.
+            enhanced_claim = await self._enhance_claim(claim)
             enhanced_claims.append(enhanced_claim)
         
         return {
             "claims": enhanced_claims,
-            "source_url": source_url,
-            "extraction_timestamp": datetime.utcnow().isoformat()
+            "processed_sources_count": len(sources)
         }
-    
-    async def _extract_claims(self, content: str, company_name: str, source_url: str) -> List[Dict[str, Any]]:
-        """Extract factual claims from content"""
-        prompt = f"""Extract factual claims about {company_name} from this content. 
+
+    async def _extract_claims_from_batch(self, sources: List[Dict[str, Any]], company_name: str) -> List[Dict[str, Any]]:
+        """Extracts factual claims from a batch of documents using a single API call."""
         
-        Focus on:
-        - Founding dates and founders
-        - Funding rounds and amounts  
-        - Key product launches
-        - Major business events
-        - Financial metrics
-        - Strategic decisions
-        - Leadership changes
-        
-        For each claim, provide:
-        - claim: The factual statement
-        - date: When it happened (if mentioned)
-        - evidence_snippet: The exact text supporting this claim
-        - confidence: 0.0-1.0 based on how clearly stated
-        
-        Return as JSON array. Only include verifiable facts, not opinions.
-        
-        Content:
-        {content[:3000]}...
+        # Prepare the documents for the prompt, keeping the payload reasonable
+        prompt_documents = []
+        for source in sources:
+            prompt_documents.append({
+                "source_url": source.get("url"),
+                "content": source.get("content", "")[:5000] # Truncate content for the prompt
+            })
+
+        prompt = f"""Your task is to act as a meticulous fact extractor. From the provided JSON array of documents about {company_name}, extract all verifiable, factual claims.
+
+        **Input Format:**
+        You will be given a JSON array of document objects, where each object has a "source_url" and "content".
+
+        **Output Format Rules:**
+        1. The output MUST be a valid JSON array of claim objects.
+        2. Each object in the array represents a single factual claim from ONE of the documents.
+        3. CRITICAL: Each claim object MUST include the "source_url" from which it was extracted.
+        4. If no facts are found across all documents, return an empty array: [].
+
+        **JSON Object Schema for Each Claim:**
+        - "claim": (string) The concise factual statement.
+        - "date": (string) The date of the event in YYYY-MM-DD format if available, otherwise null.
+        - "evidence_snippet": (string) The exact text from the source document that supports the claim.
+        - "confidence": (float) Your confidence in the claim's accuracy from 0.0 to 1.0.
+        - "source_url": (string) The exact URL of the source document for this claim.
+
+        **Now, extract facts from the following documents:**
+
+        {json.dumps(prompt_documents, indent=2)}
         """
-        
+
         messages = [{"role": "user", "content": prompt}]
-        response = await self.call_llm(messages, temperature=0.1)
-        
+        response = await self.call_llm(messages, temperature=0.0)
+
         try:
-            claims = json.loads(response)
+            match = re.search(r'```json\n(.*?)\n```', response, re.DOTALL)
+            json_str = match.group(1) if match else response
+            claims = json.loads(json_str)
             return claims if isinstance(claims, list) else []
-        except:
-            return []   
- 
-    async def _enhance_claim(self, claim: Dict[str, Any], content: str) -> Dict[str, Any]:
-        """Enhance claim with additional metadata"""
+        except json.JSONDecodeError:
+            print(f"Failed to decode JSON from LLM batch response.")
+            return []
+        except Exception as e:
+            print(f"An unexpected error occurred during batch claim extraction: {e}")
+            return []
+
+    async def _enhance_claim(self, claim: Dict[str, Any]) -> Dict[str, Any]:
+        """Enhance claim with additional metadata (entities, parsed date)."""
         claim_text = claim.get("claim", "")
         
-        # Extract entities (subject, predicate, object)
         entities = await self._extract_entities(claim_text)
         claim.update(entities)
         
-        # Parse and normalize dates
         date_str = claim.get("date", "")
         if date_str:
             parsed_date = self._parse_date(date_str)
             claim["parsed_date"] = parsed_date
         
-        # Find exact position in content
-        evidence = claim.get("evidence_snippet", "")
-        if evidence and evidence in content:
-            start_pos = content.find(evidence)
-            claim["start_char"] = start_pos
-            claim["end_char"] = start_pos + len(evidence)
-        
         return claim
-    
+
     async def _extract_entities(self, claim_text: str) -> Dict[str, str]:
         """Extract subject, predicate, object from claim"""
-        prompt = f"""Break down this claim into subject, predicate, and object:
+        prompt = f"""Break down this claim into subject, predicate, and object: 
         
-        Claim: "{claim_text}"
+        Claim: "{claim_text}" 
         
         Return JSON with:
         - subject: Who/what the claim is about
@@ -118,32 +123,31 @@ class ExtractorAgent(BaseAgent):
     
     def _parse_date(self, date_str: str) -> str:
         """Parse various date formats into ISO format"""
-        # Common date patterns
-        patterns = [
-            r'\b(\d{4})\b',  # Year only
-            r'\b(\d{1,2})/(\d{1,2})/(\d{4})\b',  # MM/DD/YYYY
-            r'\b(\d{4})-(\d{1,2})-(\d{1,2})\b',  # YYYY-MM-DD
-            r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})\b'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, date_str, re.IGNORECASE)
-            if match:
-                if len(match.groups()) == 1:  # Year only
-                    return f"{match.group(1)}-01-01"
-                elif len(match.groups()) == 3:
-                    if pattern == patterns[1]:  # MM/DD/YYYY
-                        month, day, year = match.groups()
-                        return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-                    elif pattern == patterns[2]:  # YYYY-MM-DD
-                        return f"{match.group(1)}-{match.group(2).zfill(2)}-{match.group(3).zfill(2)}"
-                    elif pattern == patterns[3]:  # Month DD, YYYY
-                        month_name, day, year = match.groups()
-                        month_num = {
-                            'january': '01', 'february': '02', 'march': '03', 'april': '04',
-                            'may': '05', 'june': '06', 'july': '07', 'august': '08',
-                            'september': '09', 'october': '10', 'november': '11', 'december': '12'
-                        }.get(month_name.lower(), '01')
-                        return f"{year}-{month_num}-{day.zfill(2)}"
-        
-        return ""  # Could not parse
+        if not date_str: return ""
+        try:
+            # Attempt to use dateutil for robust parsing
+            from dateutil.parser import parse
+            dt = parse(date_str)
+            return dt.strftime('%Y-%m-%d')
+        except (ImportError, ValueError, TypeError):
+            # Fallback to regex for simple cases if dateutil fails or is not available
+            patterns = [
+                r'\b(\d{4})\b',  # Year only
+                r'\b(\d{4})-(\d{1,2})-(\d{1,2})\b',  # YYYY-MM-DD
+                r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})\b'
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, date_str, re.IGNORECASE)
+                if match:
+                    if len(match.groups()) == 1: return f"{match.group(1)}-01-01"
+                    if len(match.groups()) == 3:
+                        if pattern == patterns[1]: return f"{match.group(1)}-{match.group(2).zfill(2)}-{match.group(3).zfill(2)}"
+                        if pattern == patterns[2]:
+                            month_name, day, year = match.groups()
+                            month_num = {
+                                'january': '01', 'february': '02', 'march': '03', 'april': '04',
+                                'may': '05', 'june': '06', 'july': '07', 'august': '08',
+                                'september': '09', 'october': '10', 'november': '11', 'december': '12'
+                            }.get(month_name.lower(), '01')
+                            return f"{year}-{month_num}-{day.zfill(2)}"
+            return ""

@@ -1,4 +1,5 @@
 import asyncio
+import aiohttp
 from typing import Dict, Any, List
 from pathlib import Path
 import json
@@ -7,6 +8,7 @@ from src.agents.researcher import ResearcherAgent
 from src.agents.extractor import ExtractorAgent
 from src.agents.scriptwriter import ScriptwriterAgent
 from src.agents.fact_checker import FactCheckerAgent
+from src.agents.voiceover_agent import VoiceoverAgent
 from src.crawlers.web_crawler import WebCrawler
 from src.media.pipeline import MediaPipeline
 from src.database import get_db
@@ -21,84 +23,101 @@ class ResearchPipeline:
         self.extractor = ExtractorAgent()
         self.scriptwriter = ScriptwriterAgent()
         self.fact_checker = FactCheckerAgent()
-        self.crawler = WebCrawler()
+        self.voiceover_agent = VoiceoverAgent()
+        self.crawler = None  # Will be initialized with session
         self.media_pipeline = MediaPipeline()
+        self.session = None  # Will be created in async context
     
     async def run(self, company_name: str, output_dir: str = "./output") -> Dict[str, Any]:
         """Run the complete research pipeline"""
         print(f"Starting research pipeline for {company_name}")
         
-        # Create output directory
-        company_slug = company_name.lower().replace(" ", "_").replace(".", "")
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        run_dir = Path(output_dir) / company_slug / timestamp
-        run_dir.mkdir(parents=True, exist_ok=True)
-        
-        results = {
-            "company_name": company_name,
-            "company_slug": company_slug,
-            "run_id": timestamp,
-            "output_dir": str(run_dir),
-            "pipeline_steps": {}
-        }
-        
-        try:
-            # Step 1: Discovery
-            print("Step 1: Discovering sources...")
-            discovery_results = await self.researcher.process({
+        # Create aiohttp session for this pipeline run
+        async with aiohttp.ClientSession() as session:
+            self.session = session
+            self.crawler = WebCrawler(session)  # Pass session to WebCrawler
+            
+            # Create output directory
+            company_slug = company_name.lower().replace(" ", "_").replace(".", "")
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            run_dir = Path(output_dir) / company_slug / timestamp
+            run_dir.mkdir(parents=True, exist_ok=True)
+            
+            results = {
                 "company_name": company_name,
-                "max_sources": 30
-            })
-            results["pipeline_steps"]["discovery"] = discovery_results
-            
-            # Step 2: Crawling
-            print("Step 2: Crawling sources...")
-            crawl_results = await self._crawl_sources(discovery_results["sources"])
-            results["pipeline_steps"]["crawling"] = crawl_results
-            
-            # Step 3: Extraction
-            print("Step 3: Extracting facts...")
-            extraction_results = await self._extract_facts(crawl_results, company_name)
-            results["pipeline_steps"]["extraction"] = extraction_results
-            
-            # Step 4: Save to database
-            print("Step 4: Saving to database...")
-            await self._save_to_database(company_name, company_slug, crawl_results, extraction_results)
-            
-            # Step 5: Fact-checking
-            print("Step 5: Fact-checking claims...")
-            fact_check_results = await self.fact_checker.process({"company_slug": company_slug})
-            results["pipeline_steps"]["fact_checking"] = fact_check_results
-            
-            # Step 6: Script generation
-            print("Step 6: Generating script...")
-            script_results = await self.scriptwriter.process({
                 "company_slug": company_slug,
-                "style": "storytelling",
-                "target_words": 1600
-            })
-            results["pipeline_steps"]["script_generation"] = script_results
+                "run_id": timestamp,
+                "output_dir": str(run_dir),
+                "pipeline_steps": {}
+            }
             
-            # Step 7: Media collection
-            print("Step 7: Collecting media assets...")
-            if not script_results.get("error"):
-                media_results = await self.media_pipeline.collect_media_for_script({
+            try:
+                # Step 1: Discovery
+                print("Step 1: Discovering sources...")
+                discovery_results = await self.researcher.process({
                     "company_name": company_name,
-                    "broll_suggestions": script_results.get("broll_suggestions", [])
-                }, run_dir)
-                results["pipeline_steps"]["media_collection"] = media_results
-            
-            # Step 8: Generate final outputs
-            print("Step 8: Generating final outputs...")
-            await self._generate_outputs(results, run_dir)
-            
-            print(f"Pipeline completed successfully. Results in: {run_dir}")
-            return results
-            
-        except Exception as e:
-            print(f"Pipeline error: {e}")
-            results["error"] = str(e)
-            return results   
+                    "max_sources": 30
+                })
+                results["pipeline_steps"]["discovery"] = discovery_results
+                
+                # Step 2: Crawling
+                print("Step 2: Crawling sources...")
+                crawl_results = await self._crawl_sources(discovery_results["sources"])
+                results["pipeline_steps"]["crawling"] = crawl_results
+                
+                # Step 3: Extraction
+                print("Step 3: Extracting facts...")
+                extraction_results = await self._extract_facts(crawl_results, company_name)
+                results["pipeline_steps"]["extraction"] = extraction_results
+                
+                # Step 4: Save to database
+                print("Step 4: Saving to database...")
+                await self._save_to_database(company_name, company_slug, crawl_results, extraction_results)
+                
+                # Step 5: Fact-checking
+                print("Step 5: Fact-checking claims...")
+                fact_check_results = await self.fact_checker.process({"company_slug": company_slug})
+                results["pipeline_steps"]["fact_checking"] = fact_check_results
+                
+                # Step 6: Script generation
+                print("Step 6: Generating script...")
+                script_results = await self.scriptwriter.process({
+                    "company_slug": company_slug,
+                    "style": "storytelling",
+                    "target_words": 1600
+                })
+                results["pipeline_steps"]["script_generation"] = script_results
+
+                # Step 6.5: Voiceover & Timeline Generation
+                if not script_results.get("error"):
+                    print("Step 6.5: Generating voiceover and timeline...")
+                    voiceover_results = await self.voiceover_agent.process({
+                        "script_content": script_results.get("script", ""),
+                        "broll_suggestions": script_results.get("broll_suggestions", []),
+                        "output_dir": run_dir
+                    })
+                    results["pipeline_steps"]["voiceover_generation"] = voiceover_results
+                
+                # Step 7: Media collection
+                print("Step 7: Collecting media assets...")
+                if not script_results.get("error"):
+                    media_results = await self.media_pipeline.collect_media_for_script({
+                        "company_name": company_name,
+                        "broll_suggestions": script_results.get("broll_suggestions", [])
+                    }, run_dir)
+                    results["pipeline_steps"]["media_collection"] = media_results
+                
+                # Step 8: Generate final outputs
+                print("Step 8: Generating final outputs...")
+                await self._generate_outputs(results, run_dir)
+                
+                print(f"Pipeline completed successfully. Results in: {run_dir}")
+                return results
+                
+            except Exception as e:
+                print(f"Pipeline error: {e}")
+                results["error"] = str(e)
+                return results   
  
     async def _crawl_sources(self, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Crawl discovered sources to get content"""
@@ -115,9 +134,9 @@ class ResearchPipeline:
                         source["content"] = content
                         source["crawled_at"] = datetime.utcnow().isoformat()
                         crawled_sources.append(source)
-                        print(f"✓ Crawled: {source['title'][:50]}...")
+                        print(f"✅ Crawled: {source['title'][:50]}...")
                 except Exception as e:
-                    print(f"✗ Failed to crawl {source['url']}: {e}")
+                    print(f"❌ Failed to crawl {source['url']}: {e}")
         
         # Crawl sources concurrently
         tasks = [crawl_single(source) for source in sources[:15]]  # Limit to 15 sources
@@ -126,30 +145,41 @@ class ResearchPipeline:
         return crawled_sources
     
     async def _extract_facts(self, crawled_sources: List[Dict[str, Any]], company_name: str) -> List[Dict[str, Any]]:
-        """Extract facts from crawled content"""
+        """Extracts facts from crawled content by batching sources to reduce API calls."""
         all_claims = []
-        
-        for source in crawled_sources:
-            if not source.get("content"):
-                continue
-                
+        batch_size = 5  # Process 5 articles at a time
+
+        # Create batches of sources
+        source_batches = [crawled_sources[i:i + batch_size] for i in range(0, len(crawled_sources), batch_size)]
+
+        for i, batch in enumerate(source_batches):
+            print(f"Processing extraction batch {i+1}/{len(source_batches)}...")
             try:
+                # Filter out sources with no content before sending to the agent
+                valid_sources = [s for s in batch if s.get("content")]
+                if not valid_sources:
+                    continue
+
                 extraction_result = await self.extractor.process({
-                    "content": source["content"],
-                    "source_url": source["url"],
+                    "sources": valid_sources,
                     "company_name": company_name
                 })
                 
                 claims = extraction_result.get("claims", [])
+                print(f"✅ Extracted {len(claims)} claims from batch {i+1}")
+                
+                # Add source metadata back to the claims for database saving
+                source_map = {s["url"]: s for s in valid_sources}
                 for claim in claims:
-                    claim["source_title"] = source.get("title", "")
-                    claim["source_domain"] = source.get("domain", "")
+                    source_url = claim.get("source_url")
+                    if source_url and source_url in source_map:
+                        claim["source_title"] = source_map[source_url].get("title", "")
+                        claim["source_domain"] = source_map[source_url].get("domain", "")
                 
                 all_claims.extend(claims)
-                print(f"✓ Extracted {len(claims)} claims from {source['title'][:50]}...")
-                
+
             except Exception as e:
-                print(f"✗ Failed to extract from {source['url']}: {e}")
+                print(f"❌ Failed to process extraction batch {i+1}: {e}")
         
         return all_claims
     
@@ -194,11 +224,11 @@ class ResearchPipeline:
                 db.add(claim)
             
             db.commit()
-            print(f"✓ Saved {len(crawled_sources)} sources and {len(claims)} claims to database")
+            print(f"✅ Saved {len(crawled_sources)} sources and {len(claims)} claims to database")
             
         except Exception as e:
             db.rollback()
-            print(f"✗ Database save error: {e}")
+            print(f"❌ Database save error: {e}")
         finally:
             db.close()
     
@@ -249,7 +279,7 @@ class ResearchPipeline:
             with open(output_dir / "thumbnail_concepts.txt", "w") as f:
                 f.write(thumbnail_concepts)
         
-        print(f"✓ Generated outputs in {output_dir}")
+        print(f"✅ Generated outputs in {output_dir}")
     
     def _generate_report(self, company_name: str, claims: List[Dict[str, Any]]) -> str:
         """Generate a basic research report"""
@@ -277,7 +307,7 @@ class ResearchPipeline:
         script_content = script_data.get("script", "")
         
         # Use the scriptwriter's LLM capability
-        prompt = f"""Based on this script about {company_name}, generate 5 YouTube video titles and 3 thumbnail concepts.
+        prompt = f"""Based on this script about {company_name}, generate 5 YouTube video titles and 3 thumbnail concepts. 
         
         Script excerpt: {script_content[:1000]}...
         

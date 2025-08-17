@@ -11,7 +11,7 @@ from src.pipeline import ResearchPipeline
 from src.database import create_tables
 
 @click.command()
-@click.option('--company', required=True, help='Company name to research')
+@click.option('--company', help='Company name to research')
 @click.option('--output-dir', default='./output', help='Output directory')
 @click.option('--max-sources', default=30, help='Maximum sources to crawl')
 @click.option('--style', default='storytelling', type=click.Choice(['documentary', 'energetic', 'storytelling']), help='Script style')
@@ -26,6 +26,12 @@ def main(company: str, output_dir: str, max_sources: int, style: str, skip_media
         print("Database initialized successfully!")
         return
     
+    if not company:
+        ctx = click.get_current_context()
+        click.echo("Error: Missing option '--company' is required when not using '--init-db'.")
+        click.echo(ctx.get_help())
+        ctx.exit(1)
+
     print(f"🔍 Starting AI Research Pipeline for: {company}")
     print(f"📁 Output directory: {output_dir}")
     print(f"🌐 Max sources: {max_sources}")
@@ -60,6 +66,10 @@ def main(company: str, output_dir: str, max_sources: int, style: str, skip_media
         sg = steps['script_generation']
         if not sg.get('error'):
             print(f"📝 Script generated: {sg.get('word_count', 0)} words ({sg.get('estimated_duration', 0)} min)")
+    if "voiceover_generation" in steps:
+        vg = steps['voiceover_generation']
+        if not vg.get('error'):
+            print(f"🎤 Voiceover generated: {vg.get('audio_files_generated', 0)} audio files")
     if "media_collection" in steps:
         mc = steps['media_collection']
         print(f"🎬 Media assets: {mc.get('successfully_downloaded', 0)} files downloaded")

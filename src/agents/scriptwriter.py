@@ -61,8 +61,8 @@ class ScriptwriterAgent(BaseAgent):
             "estimated_duration": self._estimate_duration(script),
             "generated_at": datetime.utcnow().isoformat()
         }    
-    as
-ync def _get_research_data(self, company_slug: str) -> Dict[str, Any]:
+
+    async def _get_research_data(self, company_slug: str) -> Dict[str, Any]:
         """Retrieve research data from database"""
         db = next(get_db())
         
@@ -185,7 +185,7 @@ ync def _get_research_data(self, company_slug: str) -> Dict[str, Any]:
                     {"name": "Competition", "word_count": 140, "key_points": ["Market position"]},
                     {"name": "Lessons", "word_count": 250, "key_points": ["Key takeaways"]}
                 ]
-            }   
+            }
  
     async def _generate_script(self, research_data: Dict[str, Any], outline: Dict[str, Any], style: str) -> str:
         """Generate the full script based on outline and research"""
@@ -318,5 +318,5 @@ ync def _get_research_data(self, company_slug: str) -> Dict[str, Any]:
     def _extract_timestamps(self, script: str) -> List[str]:
         """Extract timestamp markers from script"""
         import re
-        timestamps = re.findall(r'\[(\d{1,2}:\d{2})\]', script)
+        timestamps = re.findall(r'\\[(\\\\d{1,2}:\\\\d{2})\\]', script)
         return timestamps

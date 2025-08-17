@@ -8,21 +8,13 @@ from urllib.parse import urljoin, urlparse
 class WebCrawler:
     """Web crawler for extracting content from URLs"""
     
-    def __init__(self, delay: float = 1.0):
+    def __init__(self, session: aiohttp.ClientSession, delay: float = 1.0):
+        self.session = session
         self.delay = delay
-        self.session = None
         self.last_request_time = {}
     
     async def crawl_url(self, url: str) -> Optional[str]:
         """Crawl a single URL and extract text content"""
-        if not self.session:
-            self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30),
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-                }
-            )
-        
         try:
             # Rate limiting per domain
             domain = urlparse(url).netloc
@@ -83,8 +75,3 @@ class WebCrawler:
         except Exception as e:
             print(f"Text extraction error: {e}")
             return ""
-    
-    async def close(self):
-        """Close the HTTP session"""
-        if self.session:
-            await self.session.close()

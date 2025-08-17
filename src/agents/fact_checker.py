@@ -22,33 +22,195 @@ class FactCheckerAgent(BaseAgent):
         if not company_slug:
             return {"error": "Company slug required"}
         
-        # Get all claims for the company
-        claims_data = await self._get_company_claims(company_slug)
-        if not claims_data:
-            return {"error": "No claims found for company"}
+        try:
+            # Get all claims for the company
+            claims_data = await self._get_company_claims(company_slug)
+            if not claims_data:
+                return {"error": "No claims found for company"}
+            
+            # Cross-reference claims
+            verification_results = await self.batch_check_facts(claims_data["claims"], claims_data["sources"])
+            
+            # Update database with verification results
+            await self._update_claim_verification(verification_results)
+            
+            # Generate fact-check report
+            report = self._generate_fact_check_report(verification_results)
+            
+            return {
+                "company_slug": company_slug,
+                "total_claims": len(verification_results),
+                "verified_claims": len([v for v in verification_results if v.get("verified", False)]),
+                "flagged_claims": len([v for v in verification_results if v.get("flagged", False)]),
+                "verification_results": verification_results,
+                "report": report,
+                "checked_at": datetime.utcnow().isoformat()
+            }
         
-        # Cross-reference claims
-        verification_results = []
+        except Exception as e:
+            print(f"Fact checker process error: {e}")
+            return {
+                "error": f"Fact checking failed: {str(e)}",
+                "company_slug": company_slug,
+                "total_claims": 0,
+                "verified_claims": 0,
+                "flagged_claims": 0,
+                "verification_results": [],
+                "report": "# Fact-Check Report\n\nFact-checking failed due to processing error.",
+                "checked_at": datetime.utcnow().isoformat()
+            }
+
+
+    async def batch_check_facts(self, claims: List[Dict[str, Any]], sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Batch verify multiple claims against available sources using a single LLM call for initial verification."""
         
-        for claim in claims_data["claims"]:
-            verification = await self._verify_claim(claim, claims_data["sources"])
-            verification_results.append(verification)
+        # Prepare batched prompt for initial verification
+        batched_prompt_parts = []
+        for i, claim in enumerate(claims):
+            claim_text = claim.get("claim", "")
+            claim_date = claim.get("claim_date")
+            
+            # Include relevant sources for each claim in the prompt
+            # For true batching, we need to decide how to present sources for multiple claims.
+            # For now, let's just include a general instruction about sources.
+            
+            batched_prompt_parts.append(f"Claim {i+1}:\nClaim Text: \"{claim_text}\"\nClaim Date: {claim_date if claim_date else 'N/A'}\n")
+            
+        # Add all sources to the prompt, as they might be relevant to multiple claims
+        sources_text = "\n\n".join([f"Source {s['id']}: {s['title']} ({s['url']})\nContent: {s['content'][:1000]}..." for s in sources]) # Limit source content to avoid exceeding token limits
         
-        # Update database with verification results
-        await self._update_claim_verification(verification_results)
+        # Fix the f-string issue by using a separate variable for the join
+        claims_text = '\n'.join(batched_prompt_parts)
         
-        # Generate fact-check report
-        report = self._generate_fact_check_report(verification_results)
+        full_prompt = f"""You are a fact-checking AI. Your task is to verify a list of claims against the provided sources.
+For each claim, determine if it is SUPPORTED, UNSUPPORTED, or REQUIRES_MORE_INFO based on the given sources.
+Also, identify if there are any contradictions within the sources for each claim.
+
+Here are the claims to verify:
+
+{claims_text}
+
+Here are the available sources:
+
+{sources_text}
+
+For each claim, provide a JSON object with the following structure:
+{{
+    "claim_id": "ID of the claim",
+    "claim": "The original claim text",
+    "status": "SUPPORTED" | "UNSUPPORTED" | "REQUIRES_MORE_INFO",
+    "contradiction_found": true | false,
+    "reasoning": "Brief explanation for the status and contradiction_found"
+}}
+
+Return a JSON array of these objects, one for each claim. Ensure the output is valid JSON.
+"""
+        messages = [{"role": "user", "content": full_prompt}]
         
-        return {
-            "company_slug": company_slug,
-            "total_claims": len(verification_results),
-            "verified_claims": len([v for v in verification_results if v["verified"]]),
-            "flagged_claims": len([v for v in verification_results if v["flagged"]]),
-            "verification_results": verification_results,
-            "report": report,
-            "checked_at": datetime.utcnow().isoformat()
-        }
+        try:
+            batched_response = await self.call_llm(messages, temperature=0.1)
+            if not batched_response or not batched_response.strip():
+                raise ValueError("Empty LLM response")
+            
+            # Clean up markdown formatting if present
+            cleaned_response = batched_response.strip()
+            if cleaned_response.startswith("```json"):
+                cleaned_response = cleaned_response[7:]  # Remove ```json
+            if cleaned_response.startswith("```"):
+                cleaned_response = cleaned_response[3:]   # Remove ```
+            if cleaned_response.endswith("```"):
+                cleaned_response = cleaned_response[:-3]  # Remove trailing ```
+            cleaned_response = cleaned_response.strip()
+            
+            initial_verification_results = json.loads(cleaned_response)
+        except Exception as e:
+            print(f"Error parsing batched LLM response: {e}")
+            print(f"Raw LLM response: {batched_response[:200] if batched_response else 'None'}...")
+            # Fallback to individual verification if batching fails
+            initial_verification_results = []
+            for claim in claims:
+                initial_verification_results.append({
+                    "claim_id": claim.get("id"),
+                    "claim": claim.get("claim"),
+                    "status": "REQUIRES_MORE_INFO",
+                    "contradiction_found": False,
+                    "reasoning": "Batch verification failed or parse error."
+                })
+            # Return the fallback results with proper structure for final processing
+            fallback_results = []
+            for fallback_result in initial_verification_results:
+                claim_id = fallback_result.get("claim_id")
+                original_claim = next((c for c in claims if c.get("id") == claim_id), None)
+                
+                if original_claim:
+                    fallback_results.append({
+                        "claim_id": claim_id,
+                        "claim": fallback_result.get("claim", "Unknown Claim"),
+                        "verified": False,
+                        "flagged": True,
+                        "verification_score": 0.1,
+                        "supporting_sources_count": 0,
+                        "supporting_sources": [],
+                        "date_consistency": {"consistent": False, "note": "Fallback due to LLM error"},
+                        "contradictions": [],
+                        "recommendation": "MANUAL_REVIEW_REQUIRED - LLM processing failed"
+                    })
+                else:
+                    fallback_results.append({
+                        "claim_id": claim_id,
+                        "claim": fallback_result.get("claim", "Unknown Claim"),
+                        "verified": False,
+                        "flagged": True,
+                        "verification_score": 0.0,
+                        "supporting_sources_count": 0,
+                        "supporting_sources": [],
+                        "date_consistency": {"consistent": False, "note": "Claim not found"},
+                        "contradictions": [],
+                        "recommendation": "MANUAL_REVIEW_REQUIRED - Claim ID mismatch"
+                    })
+            return fallback_results
+
+        final_verification_results = []
+        for initial_result in initial_verification_results:
+            claim_id = initial_result.get("claim_id")
+            original_claim = next((c for c in claims if c.get("id") == claim_id), None)
+            
+            if original_claim:
+                try:
+                    # Now, perform the more detailed checks for each claim individually
+                    verification = await self._verify_claim_detailed(original_claim, sources, initial_result)
+                    final_verification_results.append(verification)
+                except Exception as e:
+                    print(f"Error in detailed verification for claim {claim_id}: {e}")
+                    # Add fallback verification result
+                    final_verification_results.append({
+                        "claim_id": claim_id,
+                        "claim": original_claim.get("claim", "Unknown Claim"),
+                        "verified": False,
+                        "flagged": True,
+                        "verification_score": 0.0,
+                        "supporting_sources_count": 0,
+                        "supporting_sources": [],
+                        "date_consistency": {"consistent": False, "note": "Detailed verification failed"},
+                        "contradictions": [],
+                        "recommendation": "MANUAL_REVIEW_REQUIRED - Processing error"
+                    })
+            else:
+                print(f"Warning: Claim with ID {claim_id} not found in original claims list.")
+                final_verification_results.append({
+                    "claim_id": claim_id,
+                    "claim": initial_result.get("claim", "Unknown Claim"),
+                    "verified": False,
+                    "flagged": True,
+                    "verification_score": 0.0,
+                    "supporting_sources_count": 0,
+                    "supporting_sources": [],
+                    "date_consistency": {"consistent": False, "note": "Claim not_found"},
+                    "contradictions": [],
+                    "recommendation": "MANUAL_REVIEW_REQUIRED - Claim ID mismatch"
+                })
+        
+        return final_verification_results
     
     async def _get_company_claims(self, company_slug: str) -> Dict[str, Any]:
         """Get all claims and sources for a company"""
@@ -96,8 +258,9 @@ class FactCheckerAgent(BaseAgent):
         finally:
             db.close()  
   
-    async def _verify_claim(self, claim: Dict[str, Any], 
-                          sources: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def _verify_claim_detailed(self, claim: Dict[str, Any], 
+                                  sources: List[Dict[str, Any]], 
+                                  initial_llm_result: Dict[str, Any]) -> Dict[str, Any]:
         """Verify a single claim against available sources"""
         claim_text = claim.get("claim", "")
         claim_date = claim.get("claim_date")
@@ -113,12 +276,21 @@ class FactCheckerAgent(BaseAgent):
             supporting_sources, date_consistency, claim.get("confidence", 0)
         )
         
-        # Determine verification status
-        verified = verification_score >= self.confidence_threshold and len(supporting_sources) >= self.min_sources_required
-        flagged = verification_score < 0.5 or len(supporting_sources) < 1
+        # Determine verification status based on initial LLM result and detailed checks
+        verified = initial_llm_result.get("status") == "SUPPORTED" and \
+                   verification_score >= self.confidence_threshold and \
+                   len(supporting_sources) >= self.min_sources_required
+        flagged = initial_llm_result.get("status") == "UNSUPPORTED" or \
+                  verification_score < 0.5 or \
+                  len(supporting_sources) < 1
         
-        # Check for contradictions
-        contradictions = await self._find_contradictions(claim_text, sources)
+        # Check for contradictions (from initial LLM result and detailed check)
+        contradictions = []
+        if initial_llm_result.get("contradiction_found", False):
+            contradictions.append({"reasoning": initial_llm_result.get("reasoning", "Contradiction indicated by initial LLM check.")})
+        
+        detailed_contradictions = await self._find_contradictions(claim_text, sources)
+        contradictions.extend(detailed_contradictions)
         
         return {
             "claim_id": claim.get("id"),
@@ -167,10 +339,8 @@ class FactCheckerAgent(BaseAgent):
     async def _check_source_support(self, claim: str, content: str, 
                                   source: Dict[str, Any]) -> Dict[str, Any]:
         """Check if a source supports a specific claim"""
-        prompt = f"""Analyze if this source content supports the given claim.
-        
-        Claim: "{claim}"
-        
+        prompt = f"""Analyze if this source content supports the given claim.        
+        Claim: \"{claim}\"        
         Source: {source.get('title', 'Unknown')} ({source.get('domain', 'Unknown')})
         Content excerpt: {content[:1500]}...
         
@@ -193,7 +363,17 @@ class FactCheckerAgent(BaseAgent):
         response = await self.call_llm(messages, temperature=0.1)
         
         try:
-            return json.loads(response)
+            # Clean markdown formatting
+            cleaned_response = response.strip() if response else ""
+            if cleaned_response.startswith("```json"):
+                cleaned_response = cleaned_response[7:]
+            if cleaned_response.startswith("```"):
+                cleaned_response = cleaned_response[3:]
+            if cleaned_response.endswith("```"):
+                cleaned_response = cleaned_response[:-3]
+            cleaned_response = cleaned_response.strip()
+            
+            return json.loads(cleaned_response)
         except:
             return {"supports": False, "strength": 0.0, "evidence": "", "reasoning": "Parse error"}
     
@@ -242,17 +422,26 @@ class FactCheckerAgent(BaseAgent):
         """Extract dates from text using LLM"""
         prompt = f"""Extract all dates mentioned in this text and convert to ISO format (YYYY-MM-DD).
         
-        Text: "{text}"
-        
+        Text: \"{text}\"        
         Return JSON array of dates in ISO format. Only include specific dates, not relative terms.
-        Example: ["2020-03-15", "2021-12-01"]
+        Example: [\"2020-03-15\", \"2021-12-01\"]
         """
         
         messages = [{"role": "user", "content": prompt}]
         response = await self.call_llm(messages, temperature=0.1)
         
         try:
-            dates = json.loads(response)
+            # Clean markdown formatting
+            cleaned_response = response.strip() if response else ""
+            if cleaned_response.startswith("```json"):
+                cleaned_response = cleaned_response[7:]
+            if cleaned_response.startswith("```"):
+                cleaned_response = cleaned_response[3:]
+            if cleaned_response.endswith("```"):
+                cleaned_response = cleaned_response[:-3]
+            cleaned_response = cleaned_response.strip()
+            
+            dates = json.loads(cleaned_response)
             return dates if isinstance(dates, list) else []
         except:
             return []
@@ -285,8 +474,7 @@ class FactCheckerAgent(BaseAgent):
         """Check if a source contradicts a claim"""
         prompt = f"""Analyze if this source content contradicts the given claim.
         
-        Claim: "{claim}"
-        
+        Claim: \"{claim}\"        
         Source content: {content[:1500]}...
         
         Return JSON:
@@ -303,7 +491,17 @@ class FactCheckerAgent(BaseAgent):
         response = await self.call_llm(messages, temperature=0.1)
         
         try:
-            return json.loads(response)
+            # Clean markdown formatting
+            cleaned_response = response.strip() if response else ""
+            if cleaned_response.startswith("```json"):
+                cleaned_response = cleaned_response[7:]
+            if cleaned_response.startswith("```"):
+                cleaned_response = cleaned_response[3:]
+            if cleaned_response.endswith("```"):
+                cleaned_response = cleaned_response[:-3]
+            cleaned_response = cleaned_response.strip()
+            
+            return json.loads(cleaned_response)
         except:
             return {"contradicts": False, "strength": 0.0, "evidence": "", "reasoning": "Parse error"}
     
@@ -368,6 +566,9 @@ class FactCheckerAgent(BaseAgent):
     def _generate_fact_check_report(self, verification_results: List[Dict[str, Any]]) -> str:
         """Generate human-readable fact-check report"""
         total = len(verification_results)
+        if total == 0:
+            return "# Fact-Check Report\n\nNo claims were processed."
+
         verified = len([v for v in verification_results if v["verified"]])
         flagged = len([v for v in verification_results if v["flagged"]])
         contradictions = len([v for v in verification_results if v["contradictions"]])

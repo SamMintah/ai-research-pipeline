@@ -10,9 +10,9 @@ from src.config import config
 class MediaCollector:
     """Base class for media collection from various APIs"""
     
-    def __init__(self, api_key: str = ""):
+    def __init__(self, session: aiohttp.ClientSession, api_key: str = ""):
         self.api_key = api_key
-        self.session = None
+        self.session = session
     
     async def collect_media(self, keywords: List[str], media_type: str = "photo", 
                           limit: int = 10) -> List[Dict[str, Any]]:
@@ -22,9 +22,6 @@ class MediaCollector:
     async def download_media(self, media_item: Dict[str, Any], 
                            output_dir: Path) -> Optional[str]:
         """Download media file and return local path"""
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-        
         try:
             url = media_item.get("download_url") or media_item.get("url")
             if not url:
@@ -77,18 +74,13 @@ class MediaCollector:
             return '.mp4'
         else:
             return '.jpg'  # Default
-    
-    async def close(self):
-        """Close HTTP session"""
-        if self.session:
-            await self.session.close()
 
 class UnsplashCollector(MediaCollector):
     """Collect photos from Unsplash API"""
     
-    def __init__(self):
+    def __init__(self, session: aiohttp.ClientSession):
         api_key = config.get("media", {}).get("unsplash_api_key", "")
-        super().__init__(api_key)
+        super().__init__(session, api_key)
         self.base_url = "https://api.unsplash.com"
     
     async def collect_media(self, keywords: List[str], media_type: str = "photo", 
@@ -96,9 +88,6 @@ class UnsplashCollector(MediaCollector):
         """Search Unsplash for photos"""
         if not self.api_key:
             return []
-        
-        if not self.session:
-            self.session = aiohttp.ClientSession()
         
         media_items = []
         
@@ -140,13 +129,13 @@ class UnsplashCollector(MediaCollector):
                 print(f"Unsplash search error for '{keyword}': {e}")
         
         return media_items[:limit]
-cl
-ass PexelsCollector(MediaCollector):
+
+class PexelsCollector(MediaCollector):
     """Collect photos and videos from Pexels API"""
     
-    def __init__(self):
+    def __init__(self, session: aiohttp.ClientSession):
         api_key = config.get("media", {}).get("pexels_api_key", "")
-        super().__init__(api_key)
+        super().__init__(session, api_key)
         self.base_url = "https://api.pexels.com/v1"
     
     async def collect_media(self, keywords: List[str], media_type: str = "photo", 
@@ -154,9 +143,6 @@ ass PexelsCollector(MediaCollector):
         """Search Pexels for photos or videos"""
         if not self.api_key:
             return []
-        
-        if not self.session:
-            self.session = aiohttp.ClientSession()
         
         media_items = []
         endpoint = "search" if media_type == "photo" else "videos/search"
@@ -228,16 +214,13 @@ ass PexelsCollector(MediaCollector):
 class WikimediaCollector(MediaCollector):
     """Collect images from Wikimedia Commons"""
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, session: aiohttp.ClientSession):
+        super().__init__(session)
         self.base_url = "https://commons.wikimedia.org/w/api.php"
     
     async def collect_media(self, keywords: List[str], media_type: str = "photo", 
                           limit: int = 10) -> List[Dict[str, Any]]:
         """Search Wikimedia Commons for images"""
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-        
         media_items = []
         
         for keyword in keywords[:2]:  # Limit searches

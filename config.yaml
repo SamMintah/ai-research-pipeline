@@ -1,6 +1,6 @@
 engines:
   web_search: serper  # serper, bing, google
-  llm_model: gpt-4-turbo-preview
+  llm_model: gpt-4o-mini
   vector_db: qdrant
 
 database:

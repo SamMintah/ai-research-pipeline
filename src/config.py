@@ -1,8 +1,9 @@
 import yaml
 import os
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
 
 load_dotenv()
 
@@ -17,6 +18,9 @@ class Settings(BaseSettings):
     bing_api_key: str = os.getenv("BING_API_KEY", "")
     unsplash_api_key: str = os.getenv("UNSPLASH_API_KEY", "")
     pexels_api_key: str = os.getenv("PEXELS_API_KEY", "")
+
+    # Workflow Orchestration
+    prefect_api_url: Optional[str] = os.getenv("PREFECT_API_URL")
     
     class Config:
         env_file = ".env"

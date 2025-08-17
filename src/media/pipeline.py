@@ -1,4 +1,5 @@
 import asyncio
+import aiohttp
 from pathlib import Path
 from typing import Dict, Any, List
 import json
@@ -9,11 +10,8 @@ class MediaPipeline:
     """Pipeline for collecting and organizing media assets"""
     
     def __init__(self):
-        self.collectors = {
-            "unsplash": UnsplashCollector(),
-            "pexels": PexelsCollector(), 
-            "wikimedia": WikimediaCollector()
-        }
+        # Collectors will be instantiated on-demand with a shared session
+        pass
     
     async def collect_media_for_script(self, script_data: Dict[str, Any], 
                                      output_dir: Path) -> Dict[str, Any]:
@@ -37,48 +35,57 @@ class MediaPipeline:
                 f"{company_name} headquarters"
             ])
         
-        # Collect from multiple sources
         all_media = []
-        
-        for source_name, collector in self.collectors.items():
-            try:
-                print(f"Collecting from {source_name}...")
-                
-                # Collect photos
-                photos = await collector.collect_media(
-                    keywords=keywords[:5], 
-                    media_type="photo", 
-                    limit=15
-                )
-                all_media.extend(photos)
-                
-                # Collect videos if supported
-                if source_name == "pexels":
-                    videos = await collector.collect_media(
-                        keywords=keywords[:3],
-                        media_type="video",
-                        limit=5
-                    )
-                    all_media.extend(videos)
-                
-            except Exception as e:
-                print(f"Error collecting from {source_name}: {e}")
-        
-        # Download media files
         downloaded_media = []
-        download_tasks = []
-        
-        for media_item in all_media[:30]:  # Limit downloads
-            task = self._download_with_metadata(media_item, assets_dir)
-            download_tasks.append(task)
-        
-        # Execute downloads concurrently
-        download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
-        
-        for result in download_results:
-            if isinstance(result, dict) and result.get("success"):
-                downloaded_media.append(result)
-        
+
+        async with aiohttp.ClientSession() as session:
+            collectors = {
+                "unsplash": UnsplashCollector(session),
+                "pexels": PexelsCollector(session),
+                "wikimedia": WikimediaCollector(session)
+            }
+
+            # Collect from multiple sources
+            for source_name, collector in collectors.items():
+                try:
+                    print(f"Collecting from {source_name}...")
+                    
+                    # Collect photos
+                    photos = await collector.collect_media(
+                        keywords=keywords[:5], 
+                        media_type="photo", 
+                        limit=15
+                    )
+                    all_media.extend(photos)
+                    
+                    # Collect videos if supported
+                    if source_name == "pexels":
+                        videos = await collector.collect_media(
+                            keywords=keywords[:3],
+                            media_type="video",
+                            limit=5
+                        )
+                        all_media.extend(videos)
+                    
+                except Exception as e:
+                    print(f"Error collecting from {source_name}: {e}")
+            
+            # Download media files
+            download_tasks = []
+            for media_item in all_media[:30]:  # Limit downloads
+                # Determine the correct collector for downloading
+                source = media_item.get("source", "unknown")
+                if source in collectors:
+                    task = self._download_with_metadata(collectors[source], media_item, assets_dir)
+                    download_tasks.append(task)
+
+            # Execute downloads concurrently
+            download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
+            
+            for result in download_results:
+                if isinstance(result, dict) and result.get("success"):
+                    downloaded_media.append(result)
+
         # Create media index mapping to script sections
         media_index = self._create_media_index(downloaded_media, broll_suggestions)
         
@@ -87,19 +94,15 @@ class MediaPipeline:
         with open(index_file, 'w') as f:
             json.dump(media_index, f, indent=2)
         
-        # Close collectors
-        for collector in self.collectors.values():
-            await collector.close()
-        
         return {
             "total_collected": len(all_media),
             "successfully_downloaded": len(downloaded_media),
             "assets_directory": str(assets_dir),
             "media_index": media_index,
-            "keywords_used": keywords
-        }    
-  
-  def _extract_keywords_from_broll(self, broll_suggestions: List[Dict[str, Any]]) -> List[str]:
+            "keywords_used": list(set(keywords))
+        }
+
+    def _extract_keywords_from_broll(self, broll_suggestions: List[Dict[str, Any]]) -> List[str]:
         """Extract search keywords from B-roll suggestions"""
         keywords = []
         
@@ -129,40 +132,23 @@ class MediaPipeline:
         # Remove duplicates and return
         return list(set(keywords))
     
-    async def _download_with_metadata(self, media_item: Dict[str, Any], 
+    async def _download_with_metadata(self, collector: Any, media_item: Dict[str, Any], 
                                     assets_dir: Path) -> Dict[str, Any]:
         """Download media item and return metadata"""
         try:
-            # Determine collector
-            source = media_item.get("source", "unknown")
-            collector = self.collectors.get(source)
-            
-            if not collector:
-                return {"success": False, "error": "Unknown source"}
-            
             # Download file
             local_path = await collector.download_media(media_item, assets_dir)
             
             if local_path:
-                return {
-                    "success": True,
-                    "local_path": local_path,
-                    "filename": Path(local_path).name,
-                    "source": source,
-                    "original_url": media_item.get("url"),
-                    "description": media_item.get("description"),
-                    "keywords": media_item.get("keywords", []),
-                    "license": media_item.get("license", {}),
-                    "attribution": media_item.get("attribution", ""),
-                    "width": media_item.get("width"),
-                    "height": media_item.get("height"),
-                    "safe_for_commercial_use": media_item.get("safe_for_commercial_use", False)
-                }
+                media_item["success"] = True
+                media_item["local_path"] = local_path
+                media_item["filename"] = Path(local_path).name
+                return media_item
             else:
-                return {"success": False, "error": "Download failed"}
+                return {"success": False, "error": "Download failed", "url": media_item.get("url")}
                 
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": str(e), "url": media_item.get("url")}
     
     def _create_media_index(self, downloaded_media: List[Dict[str, Any]], 
                           broll_suggestions: List[Dict[str, Any]]) -> Dict[str, Any]:
