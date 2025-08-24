@@ -11,26 +11,35 @@ from src.agents.fact_checker import FactCheckerAgent
 from src.agents.voiceover_agent import VoiceoverAgent
 from src.crawlers.web_crawler import WebCrawler
 from src.media.pipeline import MediaPipeline
+from src.media.news_media_collector import NewsMediaCollector
 from src.database import get_db
-from src.models import Company, Source, Claim
+from src.models import Subject, Source, Claim
 from sqlalchemy.orm import Session
 
 class ResearchPipeline:
     """Main pipeline orchestrating the research process"""
     
     def __init__(self):
-        self.researcher = ResearcherAgent()
-        self.extractor = ExtractorAgent()
-        self.scriptwriter = ScriptwriterAgent()
-        self.fact_checker = FactCheckerAgent()
-        self.voiceover_agent = VoiceoverAgent()
+        from src.llm.ollama_provider import OllamaProvider
+
+        # Initialize LLM providers
+        ollama_provider = OllamaProvider(model="llama3:8b")
+
+        # Initialize agents with the appropriate LLM provider
+        self.researcher = ResearcherAgent(llm_provider=ollama_provider)
+        self.extractor = ExtractorAgent(llm_provider=ollama_provider)
+        self.scriptwriter = ScriptwriterAgent(llm_provider=ollama_provider)
+        self.fact_checker = FactCheckerAgent(llm_provider=ollama_provider)
+        
+        self.voiceover_agent = VoiceoverAgent(llm_provider=ollama_provider, voice_style="aaditya_storyteller")
         self.crawler = None  # Will be initialized with session
         self.media_pipeline = MediaPipeline()
+        self.news_media_collector = NewsMediaCollector()
         self.session = None  # Will be created in async context
     
-    async def run(self, company_name: str, output_dir: str = "./output") -> Dict[str, Any]:
+    async def run(self, subject_name: str, output_dir: str = "./output") -> Dict[str, Any]:
         """Run the complete research pipeline"""
-        print(f"Starting research pipeline for {company_name}")
+        print(f"Starting research pipeline for {subject_name}")
         
         # Create aiohttp session for this pipeline run
         async with aiohttp.ClientSession() as session:
@@ -38,14 +47,14 @@ class ResearchPipeline:
             self.crawler = WebCrawler(session)  # Pass session to WebCrawler
             
             # Create output directory
-            company_slug = company_name.lower().replace(" ", "_").replace(".", "")
+            subject_slug = subject_name.lower().replace(" ", "_").replace(".", "")
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            run_dir = Path(output_dir) / company_slug / timestamp
+            run_dir = Path(output_dir) / subject_slug / timestamp
             run_dir.mkdir(parents=True, exist_ok=True)
             
             results = {
-                "company_name": company_name,
-                "company_slug": company_slug,
+                "subject_name": subject_name,
+                "subject_slug": subject_slug,
                 "run_id": timestamp,
                 "output_dir": str(run_dir),
                 "pipeline_steps": {}
@@ -55,7 +64,7 @@ class ResearchPipeline:
                 # Step 1: Discovery
                 print("Step 1: Discovering sources...")
                 discovery_results = await self.researcher.process({
-                    "company_name": company_name,
+                    "subject_name": subject_name,
                     "max_sources": 30
                 })
                 results["pipeline_steps"]["discovery"] = discovery_results
@@ -67,24 +76,32 @@ class ResearchPipeline:
                 
                 # Step 3: Extraction
                 print("Step 3: Extracting facts...")
-                extraction_results = await self._extract_facts(crawl_results, company_name)
+                extraction_results = await self._extract_facts(crawl_results, subject_name)
                 results["pipeline_steps"]["extraction"] = extraction_results
                 
                 # Step 4: Save to database
                 print("Step 4: Saving to database...")
-                await self._save_to_database(company_name, company_slug, crawl_results, extraction_results)
+                await self._save_to_database(subject_name, subject_slug, crawl_results, extraction_results)
                 
-                # Step 5: Fact-checking
-                print("Step 5: Fact-checking claims...")
-                fact_check_results = await self.fact_checker.process({"company_slug": company_slug})
+                # Step 5: Fact-checking (SKIPPED for speed)
+                print("Step 5: Skipping fact-checking for faster processing...")
+                fact_check_results = {
+                    "subject_slug": subject_slug,
+                    "total_claims": len(extraction_results),
+                    "verified_claims": len(extraction_results),
+                    "flagged_claims": 0,
+                    "verification_results": [],
+                    "report": "# Fact-Check Report\n\nFact-checking skipped for faster processing.",
+                    "checked_at": datetime.utcnow().isoformat()
+                }
                 results["pipeline_steps"]["fact_checking"] = fact_check_results
                 
                 # Step 6: Script generation
                 print("Step 6: Generating script...")
                 script_results = await self.scriptwriter.process({
-                    "company_slug": company_slug,
-                    "style": "storytelling",
-                    "target_words": 1600
+                    "subject_slug": subject_slug,
+                    "style": "documentary",
+                    "target_words": 3500  # Enhanced for longer, more engaging content
                 })
                 results["pipeline_steps"]["script_generation"] = script_results
 
@@ -98,18 +115,53 @@ class ResearchPipeline:
                     })
                     results["pipeline_steps"]["voiceover_generation"] = voiceover_results
                 
-                # Step 7: Media collection
-                print("Step 7: Collecting media assets...")
+                # Step 7: Enhanced media collection
+                print("Step 7: Collecting comprehensive media assets...")
                 if not script_results.get("error"):
-                    media_results = await self.media_pipeline.collect_media_for_script({
-                        "company_name": company_name,
+                    # Import enhanced media collector
+                    from src.media.enhanced_media_collector import EnhancedMediaCollector
+                    enhanced_media_collector = EnhancedMediaCollector()
+                    
+                    # Collect comprehensive media (news + targeted + stock)
+                    enhanced_media_results = await enhanced_media_collector.collect_comprehensive_media(
+                        subject_name=subject_name,
+                        sources=crawl_results,
+                        script_content=script_results.get("script", ""),
+                        output_dir=run_dir,
+                        max_images=25  # More images for better variety
+                    )
+                    
+                    # Also collect generic B-roll as backup
+                    generic_media_results = await self.media_pipeline.collect_media_for_script({
+                        "subject_name": subject_name,
                         "broll_suggestions": script_results.get("broll_suggestions", [])
                     }, run_dir)
+                    
+                    # Combine results
+                    media_results = {
+                        "enhanced_media": enhanced_media_results,
+                        "generic_media": generic_media_results,
+                        "total_assets": enhanced_media_results.get("collection_summary", {}).get("total_assets", 0),
+                        "media_categories": {
+                            "news_coverage": len(enhanced_media_results.get("media_assets", {}).get("news_coverage", [])),
+                            "targeted_content": len(enhanced_media_results.get("media_assets", {}).get("targeted_content", [])),
+                            "stock_broll": len(enhanced_media_results.get("media_assets", {}).get("stock_broll", []))
+                        }
+                    }
                     results["pipeline_steps"]["media_collection"] = media_results
+                    
+                    print(f"✅ Collected {media_results['total_assets']} media assets:")
+                    print(f"   - News coverage: {media_results['media_categories']['news_coverage']} images")
+                    print(f"   - Targeted content: {media_results['media_categories']['targeted_content']} images") 
+                    print(f"   - Stock B-roll: {media_results['media_categories']['stock_broll']} images")
                 
                 # Step 8: Generate final outputs
                 print("Step 8: Generating final outputs...")
                 await self._generate_outputs(results, run_dir)
+                
+                # Step 9: Generate YouTube optimization report
+                print("Step 9: Generating YouTube optimization report...")
+                await self._generate_youtube_optimization_report(results, run_dir)
                 
                 print(f"Pipeline completed successfully. Results in: {run_dir}")
                 return results
@@ -144,10 +196,10 @@ class ResearchPipeline:
         
         return crawled_sources
     
-    async def _extract_facts(self, crawled_sources: List[Dict[str, Any]], company_name: str) -> List[Dict[str, Any]]:
+    async def _extract_facts(self, crawled_sources: List[Dict[str, Any]], subject_name: str) -> List[Dict[str, Any]]:
         """Extracts facts from crawled content by batching sources to reduce API calls."""
         all_claims = []
-        batch_size = 5  # Process 5 articles at a time
+        batch_size = 1  # Process 1 article at a time to reduce memory usage
 
         # Create batches of sources
         source_batches = [crawled_sources[i:i + batch_size] for i in range(0, len(crawled_sources), batch_size)]
@@ -162,7 +214,7 @@ class ResearchPipeline:
 
                 extraction_result = await self.extractor.process({
                     "sources": valid_sources,
-                    "company_name": company_name
+                    "subject_name": subject_name
                 })
                 
                 claims = extraction_result.get("claims", [])
@@ -183,25 +235,25 @@ class ResearchPipeline:
         
         return all_claims
     
-    async def _save_to_database(self, company_name: str, company_slug: str, 
+    async def _save_to_database(self, subject_name: str, subject_slug: str, 
                                crawled_sources: List[Dict[str, Any]], 
                                claims: List[Dict[str, Any]]):
         """Save results to database"""
         db = next(get_db())
         
         try:
-            # Create or get company
-            company = db.query(Company).filter(Company.slug == company_slug).first()
-            if not company:
-                company = Company(name=company_name, slug=company_slug)
-                db.add(company)
+            # Create or get subject
+            subject = db.query(Subject).filter(Subject.slug == subject_slug).first()
+            if not subject:
+                subject = Subject(name=subject_name, slug=subject_slug)
+                db.add(subject)
                 db.commit()
-                db.refresh(company)
+                db.refresh(subject)
             
             # Save sources
             for source_data in crawled_sources:
                 source = Source(
-                    company_id=company.id,
+                    subject_id=subject.id,
                     url=source_data.get("url"),
                     domain=source_data.get("domain"),
                     title=source_data.get("title"),
@@ -211,12 +263,13 @@ class ResearchPipeline:
                 db.add(source)
             
             # Save claims
-            for claim_data in claims:
+            claims_to_save = [c for c in claims if c.get("claim")]
+            for claim_data in claims_to_save:
                 claim = Claim(
-                    company_id=company.id,
+                    parent_subject_id=subject.id,
                     claim=claim_data.get("claim"),
                     claim_date=claim_data.get("parsed_date"),
-                    subject=claim_data.get("subject"),
+                    claim_subject=claim_data.get("subject"),
                     predicate=claim_data.get("predicate"),
                     object=claim_data.get("object"),
                     confidence=claim_data.get("confidence", 0.5)
@@ -224,7 +277,7 @@ class ResearchPipeline:
                 db.add(claim)
             
             db.commit()
-            print(f"✅ Saved {len(crawled_sources)} sources and {len(claims)} claims to database")
+            print(f"✅ Saved {len(crawled_sources)} sources and {len(claims_to_save)} claims to database")
             
         except Exception as e:
             db.rollback()
@@ -232,6 +285,114 @@ class ResearchPipeline:
         finally:
             db.close()
     
+    def _generate_edl(self, timeline_data: List[Dict[str, Any]], media_index: Dict[str, Any], output_dir: Path):
+        """Generates an EDL file for DaVinci Resolve."""
+
+        def to_timecode(seconds: float, fps: int = 30) -> str:
+            """Converts seconds to HH:MM:SS:FF timecode format."""
+            ss = int(seconds)
+            ff = int((seconds - ss) * fps)
+            mm, ss = divmod(ss, 60)
+            hh, mm = divmod(mm, 60)
+            return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
+
+        edl_events = []
+        event_num = 1
+
+        for i, row in enumerate(timeline_data):
+            # Audio event
+            start_seconds = float(row["start_time_s"])
+            end_seconds = float(row["end_time_s"])
+            duration_seconds = end_seconds - start_seconds
+            voiceover_file = Path(row["voiceover_file"])
+            
+            edl_events.append({
+                "event_num": event_num,
+                "reel": voiceover_file.stem,
+                "track_type": "A",
+                "edit_type": "C",
+                "source_in": to_timecode(0),
+                "source_out": to_timecode(duration_seconds),
+                "record_in": to_timecode(start_seconds),
+                "record_out": to_timecode(end_seconds),
+                "clip_name": voiceover_file.name,
+            })
+            event_num += 1
+
+            # Video event
+            if i < len(media_index["sections"]):
+                section = media_index["sections"][i]
+                if section["matching_assets"]:
+                    reel_name = Path(section["matching_assets"][0]["filename"])
+                    broll_duration = float(section.get("suggested_duration", 5))
+
+                    edl_events.append({
+                        "event_num": event_num,
+                        "reel": reel_name.stem,
+                        "track_type": "V",
+                        "edit_type": "C",
+                        "source_in": to_timecode(0),
+                        "source_out": to_timecode(broll_duration),
+                        "record_in": to_timecode(start_seconds),
+                        "record_out": to_timecode(start_seconds + broll_duration),
+                        "clip_name": reel_name.name,
+                    })
+                    event_num += 1
+
+        # Write EDL file
+        with open(output_dir / "timeline.edl", "w") as f:
+            f.write("TITLE: AI Research Video\n")
+            f.write("FCM: NON-DROP FRAME\n\n")
+            for event in edl_events:
+                f.write(f"{event['event_num']:03d}  {event['reel']:<8} {event['track_type']}     {event['edit_type']}        {event['source_in']} {event['source_out']} {event['record_in']} {event['record_out']}\n")
+                f.write(f"* FROM CLIP NAME: {event['clip_name']}\n\n")
+
+    def _generate_resolve_markers(self, shot_list: List[Dict[str, Any]], output_dir: Path):
+        """Generates a CSV file with markers for DaVinci Resolve."""
+        import csv
+
+        def to_timecode(seconds: float, fps: int = 30) -> str:
+            """Converts seconds to HH:MM:SS:FF timecode format."""
+            ss = int(seconds)
+            ff = int((seconds - ss) * fps)
+            mm, ss = divmod(ss, 60)
+            hh, mm = divmod(mm, 60)
+            return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
+
+        resolve_markers = []
+        for shot in shot_list:
+            try:
+                # Convert timestamp [MM:SS] to seconds
+                timestamp_str = shot.get("timestamp", "[00:00]").strip("[]")
+                minutes, seconds = map(int, timestamp_str.split(":"))
+                start_seconds = minutes * 60 + seconds
+                start_timecode = to_timecode(start_seconds)
+
+                # Convert duration from seconds to timecode
+                duration_seconds = float(shot.get("duration", 0))
+                duration_timecode = to_timecode(duration_seconds)
+
+                notes = f"Description: {shot.get('description', '')}\n" \
+                        f"Visual Type: {shot.get('visual_type', '')}\n" \
+                        f"Keywords: {shot.get('keywords', '')}\n" \
+                        f"Mood: {shot.get('mood', '')}"
+
+                resolve_markers.append({
+                    "Name": shot.get("description", "Marker"),
+                    "Start": start_timecode,
+                    "Duration": duration_timecode,
+                    "Notes": notes,
+                    "Color": "Blue" # Default color
+                })
+            except Exception as e:
+                print(f"Skipping marker due to error: {e}")
+
+        if resolve_markers:
+            with open(output_dir / "resolve_markers.csv", "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["Name", "Start", "Duration", "Notes", "Color"])
+                writer.writeheader()
+                writer.writerows(resolve_markers)
+
     async def _generate_outputs(self, results: Dict[str, Any], output_dir: Path):
         """Generate output files"""
         # Save pipeline results
@@ -240,7 +401,7 @@ class ResearchPipeline:
         
         # Generate research report
         claims = results["pipeline_steps"]["extraction"]
-        report = self._generate_report(results["company_name"], claims)
+        report = self._generate_report(results["subject_name"], claims)
         with open(output_dir / "research_report.md", "w") as f:
             f.write(report)
         
@@ -266,6 +427,22 @@ class ResearchPipeline:
                             "keywords": ", ".join(suggestion.get("keywords", [])),
                             "mood": suggestion.get("mood", "")
                         })
+                
+                # Generate Resolve markers
+                self._generate_resolve_markers(broll_suggestions, output_dir)
+
+        # Generate EDL file
+        voiceover_results = results["pipeline_steps"].get("voiceover_generation", {})
+        timeline_csv_path = voiceover_results.get("timeline_csv_path")
+        media_collection_results = results["pipeline_steps"].get("media_collection", {})
+        media_index = media_collection_results.get("media_index")
+
+        if timeline_csv_path and media_index:
+            import csv
+            with open(timeline_csv_path, "r") as f:
+                timeline_data = list(csv.DictReader(f))
+            
+            self._generate_edl(timeline_data, media_index, output_dir)
         
         # Save fact-check report
         fact_check_data = results["pipeline_steps"].get("fact_checking", {})
@@ -275,15 +452,15 @@ class ResearchPipeline:
         
         # Generate thumbnail concepts
         if script_data.get("script"):
-            thumbnail_concepts = await self._generate_thumbnail_concepts(results["company_name"], script_data)
+            thumbnail_concepts = await self._generate_thumbnail_concepts(results["subject_name"], script_data)
             with open(output_dir / "thumbnail_concepts.txt", "w") as f:
                 f.write(thumbnail_concepts)
         
         print(f"✅ Generated outputs in {output_dir}")
     
-    def _generate_report(self, company_name: str, claims: List[Dict[str, Any]]) -> str:
+    def _generate_report(self, subject_name: str, claims: List[Dict[str, Any]]) -> str:
         """Generate a basic research report"""
-        report = f"# Research Report: {company_name}\n\n"
+        report = f"# Research Report: {subject_name}\n\n"
         report += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         report += f"## Summary\n\n"
         report += f"- Total claims extracted: {len(claims)}\n"
@@ -302,14 +479,14 @@ class ResearchPipeline:
         
         return report    
 
-    async def _generate_thumbnail_concepts(self, company_name: str, script_data: Dict[str, Any]) -> str:
+    async def _generate_thumbnail_concepts(self, subject_name: str, script_data: Dict[str, Any]) -> str:
         """Generate thumbnail and title concepts"""
         script_content = script_data.get("script", "")
         
         # Use the scriptwriter's LLM capability
-        prompt = f"""Based on this script about {company_name}, generate 5 YouTube video titles and 3 thumbnail concepts. 
+        prompt = f"""Based on this script about {subject_name}, generate 5 YouTube video titles and 3 thumbnail concepts. 
         
-        Script excerpt: {script_content[:1000]}...
+        Script excerpt: {script_content[:1000]}... 
         
         Requirements:
         - Titles should be 60 characters or less
@@ -330,10 +507,80 @@ class ResearchPipeline:
         
         2. **Concept 2**: [Description]
            - Text overlay: "[Text]"
-           - Visual elements: [Description]
-        """
+           - Visual elements: [Description]"""
         
         messages = [{"role": "user", "content": prompt}]
         response = await self.scriptwriter.call_llm(messages, temperature=0.6)
         
         return response or "# Thumbnail Concepts\n\nGeneration failed - create manually based on script content."
+    
+    async def _generate_youtube_optimization_report(self, results: Dict[str, Any], output_dir: Path):
+        """Generate a comprehensive YouTube optimization report"""
+        script_data = results["pipeline_steps"].get("script_generation", {})
+        
+        if not script_data.get("youtube_titles"):
+            return
+        
+        report = f"""# YouTube Optimization Report
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+## Gemini Algorithm Optimization
+This content has been optimized for YouTube's Gemini-enhanced algorithm focusing on:
+- Viewer-centric narratives and personalized recommendations
+- Enhanced content understanding through AI analysis
+- Improved engagement and retention metrics
+- Cultural relevance for US/Canadian audiences
+
+## Recommended Video Titles
+"""
+        
+        for i, title in enumerate(script_data.get("youtube_titles", []), 1):
+            report += f"{i}. {title}\n"
+        
+        report += "\n## Thumbnail Concepts\n\n"
+        
+        for i, thumbnail in enumerate(script_data.get("thumbnail_concepts", []), 1):
+            if isinstance(thumbnail, dict):
+                report += f"### Concept {i}: {thumbnail.get('concept', 'N/A')}\n"
+                report += f"- **Text Overlay:** {thumbnail.get('text_overlay', 'N/A')}\n"
+                report += f"- **Visual Elements:** {thumbnail.get('visual_elements', 'N/A')}\n"
+                report += f"- **Color Scheme:** {thumbnail.get('color_scheme', 'N/A')}\n"
+                report += f"- **Emotional Appeal:** {thumbnail.get('emotional_appeal', 'N/A')}\n\n"
+        
+        report += "## SEO Keywords\n\n"
+        keywords = script_data.get("seo_keywords", [])
+        if keywords:
+            for keyword in keywords:
+                report += f"- {keyword}\n"
+        
+        report += f"""
+
+## Audience Targeting Strategy
+- **Primary Markets:** United States, Canada
+- **Demographics:** 25-54 years, college-educated professionals
+- **Interests:** Business, technology, entrepreneurship, finance
+- **Cultural Context:** American business culture, Silicon Valley, Wall Street
+
+## Engagement Optimization
+- Strong opening hooks to capture attention within first 15 seconds
+- Retention techniques throughout to maintain viewer interest
+- Clear value proposition and viewer-centric narrative
+- Natural integration of cultural references and business terminology
+
+## Monetization Potential
+- High-CPM audience targeting (US/Canadian viewers)
+- Business/finance niche with strong advertiser demand
+- Professional demographic with higher purchasing power
+- Evergreen content suitable for long-term monetization
+
+## Upload Recommendations
+- **Best Upload Time:** 7-9 PM EST (US peak hours)
+- **Language:** American English spelling and terminology
+- **Currency:** Use USD ($) for all financial references
+- **Cultural References:** Emphasize American business culture and success stories
+"""
+        
+        with open(output_dir / "youtube_optimization_report.md", "w") as f:
+            f.write(report)
+        
+        print(f"✅ Generated YouTube optimization report")

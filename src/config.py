@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     bing_api_key: str = os.getenv("BING_API_KEY", "")
     unsplash_api_key: str = os.getenv("UNSPLASH_API_KEY", "")
     pexels_api_key: str = os.getenv("PEXELS_API_KEY", "")
+    elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "")
+    
+    # Google APIs for enhanced media collection
+    google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
+    google_search_engine_id: str = os.getenv("GOOGLE_SEARCH_ENGINE_ID", "")
 
     # Workflow Orchestration
     prefect_api_url: Optional[str] = os.getenv("PREFECT_API_URL")

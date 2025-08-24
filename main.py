@@ -11,14 +11,14 @@ from src.pipeline import ResearchPipeline
 from src.database import create_tables
 
 @click.command()
-@click.option('--company', help='Company name to research')
+@click.option('--subject', help='Subject to research (e.g., a company or person)')
 @click.option('--output-dir', default='./output', help='Output directory')
 @click.option('--max-sources', default=30, help='Maximum sources to crawl')
 @click.option('--style', default='storytelling', type=click.Choice(['documentary', 'energetic', 'storytelling']), help='Script style')
 @click.option('--skip-media', is_flag=True, help='Skip media collection')
 @click.option('--init-db', is_flag=True, help='Initialize database tables')
-def main(company: str, output_dir: str, max_sources: int, style: str, skip_media: bool, init_db: bool):
-    """Run AI research pipeline for company story videos"""
+def main(subject: str, output_dir: str, max_sources: int, style: str, skip_media: bool, init_db: bool):
+    """Run AI research pipeline for a given subject"""
     
     if init_db:
         print("Initializing database...")
@@ -26,13 +26,13 @@ def main(company: str, output_dir: str, max_sources: int, style: str, skip_media
         print("Database initialized successfully!")
         return
     
-    if not company:
+    if not subject:
         ctx = click.get_current_context()
-        click.echo("Error: Missing option '--company' is required when not using '--init-db'.")
+        click.echo("Error: Missing option '--subject' is required when not using '--init-db'.")
         click.echo(ctx.get_help())
         ctx.exit(1)
 
-    print(f"🔍 Starting AI Research Pipeline for: {company}")
+    print(f"🔍 Starting AI Research Pipeline for: {subject}")
     print(f"📁 Output directory: {output_dir}")
     print(f"🌐 Max sources: {max_sources}")
     print(f"🎬 Script style: {style}")
@@ -42,7 +42,7 @@ def main(company: str, output_dir: str, max_sources: int, style: str, skip_media
     
     # Run the pipeline
     pipeline = ResearchPipeline()
-    results = asyncio.run(pipeline.run(company, output_dir))
+    results = asyncio.run(pipeline.run(subject, output_dir))
     
     if "error" in results:
         print(f"❌ Pipeline failed: {results['error']}")

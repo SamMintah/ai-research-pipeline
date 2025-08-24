@@ -3,31 +3,49 @@ import json
 import aiohttp
 from src.agents.base import BaseAgent
 from src.config import config
+from src.llm.base_provider import LLMProvider
 
 class ResearcherAgent(BaseAgent):
-    """Agent for discovering and gathering company information sources"""
+    """Agent for discovering and gathering information sources about a subject, optimized for US/Canadian audiences and YouTube's Gemini algorithm."""
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, llm_provider: LLMProvider):
+        super().__init__(llm_provider)
+        # Enhanced search categories optimized for high-CPM audiences and engagement
         self.search_categories = [
-            "founding history",
-            "funding rounds",
-            "founder interviews", 
-            "company crises",
-            "product launches",
-            "acquisitions",
-            "lawsuits",
-            "pivots",
-            "competition"
+            "history and origin story",
+            "key events and timeline", 
+            "cultural impact and significance",
+            "controversies and criticisms",
+            "public reception and media coverage",
+            "key people involved or associated",
+            "in-depth analysis and documentaries",
+            "technical details or composition",
+            "legacy and modern relevance"
+        ]
+        
+        # High-authority sources preferred by US/Canadian audiences
+        self.preferred_sources = [
+            "wsj.com", "nytimes.com", "bloomberg.com", "ft.com", "reuters.com",
+            "techcrunch.com", "forbes.com", "businessinsider.com", "cnbc.com",
+            "cnn.com", "bbc.com", "theguardian.com", "washingtonpost.com",
+            "harvard.edu", "stanford.edu", "mit.edu", "sec.gov", "crunchbase.com",
+            "wikipedia.org", "wired.com", "theatlantic.com", "newyorker.com"
+        ]
+        
+        # US/Canadian cultural context keywords to prioritize
+        self.cultural_keywords = [
+            "Silicon Valley", "Wall Street", "Fortune 500", "NYSE", "NASDAQ",
+            "American Dream", "startup culture", "venture capital", "IPO",
+            "innovation", "disruption", "entrepreneurship", "corporate America"
         ]
     
     async def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Discover sources for a company"""
-        company_name = input_data.get("company_name")
+        """Discover sources for a subject."""
+        subject_name = input_data.get("subject_name")
         max_sources = input_data.get("max_sources", 50)
         
         # Generate search queries
-        queries = await self._generate_search_queries(company_name)
+        queries = await self._generate_search_queries(subject_name)
         
         # Search for sources
         sources = []
@@ -36,7 +54,7 @@ class ResearcherAgent(BaseAgent):
             sources.extend(search_results)
         
         # Rank and filter sources
-        ranked_sources = await self._rank_sources(sources, company_name)
+        ranked_sources = await self._rank_sources(sources, subject_name)
         
         return {
             "sources": ranked_sources[:max_sources],
@@ -44,36 +62,52 @@ class ResearcherAgent(BaseAgent):
             "queries_used": queries
         }  
   
-    async def _generate_search_queries(self, company_name: str) -> List[str]:
-        """Generate targeted search queries for the company"""
-        prompt = f"""Generate 15 specific search queries to research {company_name} for a company story video.
+    async def _generate_search_queries(self, subject_name: str) -> List[str]:
+        """Generate targeted search queries optimized for US/Canadian audiences and high-engagement content."""
+        categories_str = ", ".join(self.search_categories)
+        cultural_context = ", ".join(self.cultural_keywords)
         
-        Include queries for: founding story, funding history, founder interviews, major pivots, 
-        crises/challenges, product launches, acquisitions, lawsuits, competition, recent news.
+        prompt = f"""Generate 15 specific search queries for '{subject_name}' targeting US/Canadian audiences for a YouTube documentary.
+
+        OPTIMIZATION REQUIREMENTS:
+        - Focus on US/Canadian perspectives and cultural relevance
+        - Include business/financial angles (IPOs, valuations, market impact)
+        - Emphasize stories that resonate with North American viewers
+        - Include controversy and human interest angles for engagement
+        - Target sources from major US/Canadian media outlets
         
-        Return as JSON array of strings. Make queries specific and varied.
+        Categories to cover: {categories_str}
         
-        Example format: ["Netflix founding story Reed Hastings", "Netflix Blockbuster rejection 2000"]
+        Cultural context to include: {cultural_context}
+        
+        Return as a JSON array of strings. Make queries specific and engaging.
+        
+        Example for 'Apple': ["Apple IPO 1980 Wall Street reaction", "Steve Jobs Stanford commencement speech", "Apple vs FBI encryption controversy", "Silicon Valley garage startup myth Apple", "Apple market cap trillion dollar milestone"]
+        Example for 'Netflix': ["Netflix vs Blockbuster disruption story", "Netflix Silicon Valley startup culture", "Reed Hastings Stanford MBA background", "Netflix stock market performance IPO", "Netflix content spending Hollywood impact"]
         """
         
         messages = [{"role": "user", "content": prompt}]
-        response = await self.call_llm(messages, temperature=0.3)
+        response = await self.call_llm(messages, temperature=0.4)
         
-        try:
-            queries = json.loads(response)
-            return queries if isinstance(queries, list) else []
-        except:
-            # Fallback queries
+        queries = self._parse_json_from_response(response)
+        if queries and isinstance(queries, list):
+            return queries
+        else:
+            self.logger.warning("Failed to parse search queries from LLM, using fallback.")
+            # Combined generic and specific fallback queries for better coverage
             return [
-                f"{company_name} founding story",
-                f"{company_name} founder interview",
-                f"{company_name} funding history",
-                f"{company_name} IPO",
-                f"{company_name} crisis challenge",
-                f"{company_name} pivot strategy",
-                f"{company_name} acquisition",
-                f"{company_name} lawsuit legal",
-                f"{company_name} competition rivals"
+                f"{subject_name} history",
+                f"{subject_name} origin story",
+                f"{subject_name} timeline",
+                f"{subject_name} biography",
+                f"{subject_name} documentary",
+                f"{subject_name} analysis",
+                f"{subject_name} impact and legacy",
+                f"{subject_name} significance",
+                f"{subject_name} controversies and challenges",
+                f"{subject_name} major achievements",
+                f"{subject_name} interviews",
+                f"{subject_name} career"
             ]
     
     async def _search_web(self, query: str) -> List[Dict[str, Any]]:
@@ -118,29 +152,54 @@ class ResearcherAgent(BaseAgent):
         
         return []
     
-    async def _rank_sources(self, sources: List[Dict[str, Any]], company_name: str) -> List[Dict[str, Any]]:
-        """Rank sources by relevance and authority"""
-        # Simple ranking - can be enhanced with ML
+    async def _rank_sources(self, sources: List[Dict[str, Any]], subject_name: str) -> List[Dict[str, Any]]:
+        """Rank sources by relevance, authority, and US/Canadian audience appeal"""
+        # Enhanced ranking system prioritizing high-CPM audience sources
         authority_domains = {
-            "wikipedia.org": 5,
-            "sec.gov": 5,
-            "wsj.com": 4,
-            "nytimes.com": 4,
-            "bloomberg.com": 4,
-            "ft.com": 4,
-            "reuters.com": 4,
-            "techcrunch.com": 3,
-            "forbes.com": 3,
-            "businessinsider.com": 3,
-            "crunchbase.com": 4
+            # Tier 1: Premium US/Canadian sources (highest authority)
+            "wsj.com": 6, "nytimes.com": 6, "bloomberg.com": 6, "ft.com": 6,
+            "reuters.com": 6, "sec.gov": 6, "harvard.edu": 6, "stanford.edu": 6,
+            
+            # Tier 2: Major business/tech sources
+            "forbes.com": 5, "businessinsider.com": 5, "cnbc.com": 5,
+            "techcrunch.com": 5, "crunchbase.com": 5, "wired.com": 5,
+            
+            # Tier 3: Established media
+            "cnn.com": 4, "bbc.com": 4, "theguardian.com": 4, 
+            "washingtonpost.com": 4, "theatlantic.com": 4, "newyorker.com": 4,
+            
+            # Tier 4: Reference sources
+            "wikipedia.org": 4, "mit.edu": 4,
+            
+            # Lower priority sources
+            "medium.com": 2, "linkedin.com": 2
         }
         
         for source in sources:
             domain = source.get("domain", "")
             source["authority_score"] = authority_domains.get(domain, 1)
             
-            # Boost score if company name in title
-            if company_name.lower() in source.get("title", "").lower():
+            # Boost for subject name in title
+            if subject_name.lower() in source.get("title", "").lower():
+                source["authority_score"] += 1
+            
+            # Boost for US/Canadian cultural keywords
+            title_snippet = (source.get("title", "") + " " + source.get("snippet", "")).lower()
+            for keyword in self.cultural_keywords:
+                if keyword.lower() in title_snippet:
+                    source["authority_score"] += 0.5
+                    break
+            
+            # Boost for engagement-driving content
+            engagement_keywords = ["controversy", "scandal", "failure", "success", "breakthrough", 
+                                 "behind the scenes", "untold story", "secret", "revealed"]
+            for keyword in engagement_keywords:
+                if keyword in title_snippet:
+                    source["authority_score"] += 0.3
+                    break
+            
+            # Prioritize preferred sources
+            if domain in self.preferred_sources:
                 source["authority_score"] += 1
         
         # Sort by authority score

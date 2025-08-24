@@ -7,23 +7,23 @@ from datetime import datetime
 
 Base = declarative_base()
 
-class Company(Base):
-    __tablename__ = "companies"
+class Subject(Base):
+    __tablename__ = "subjects"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     slug = Column(String, unique=True, nullable=False)
     name = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    sources = relationship("Source", back_populates="company")
-    claims = relationship("Claim", back_populates="company")
-    media_assets = relationship("MediaAsset", back_populates="company")
+    sources = relationship("Source", back_populates="parent_subject")
+    claims = relationship("Claim", back_populates="parent_subject")
+    media_assets = relationship("MediaAsset", back_populates="subject")
 
 class Source(Base):
     __tablename__ = "sources"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    company_id = Column(UUID(as_uuid=True), ForeignKey("companies.id"))
+    subject_id = Column(UUID(as_uuid=True), ForeignKey("subjects.id"))
     url = Column(Text)
     domain = Column(String)
     title = Column(Text)
@@ -34,24 +34,24 @@ class Source(Base):
     reliability = Column(Integer)  # 1-5 scale
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    company = relationship("Company", back_populates="sources")
+    parent_subject = relationship("Subject", back_populates="sources")
     claim_sources = relationship("ClaimSource", back_populates="source")
 
 class Claim(Base):
     __tablename__ = "claims"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    company_id = Column(UUID(as_uuid=True), ForeignKey("companies.id"))
+    parent_subject_id = Column(UUID(as_uuid=True), ForeignKey("subjects.id")) # Renamed from subject_id
     claim = Column(Text, nullable=False)
     claim_date = Column(Date)
-    subject = Column(String)
+    claim_subject = Column(String) 
     predicate = Column(String)
-    object = Column(String)
+    object = Column(JSON)
     confidence = Column(Float)
     corroboration_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    company = relationship("Company", back_populates="claims")
+    parent_subject = relationship("Subject", back_populates="claims") # Renamed from subject
     claim_sources = relationship("ClaimSource", back_populates="claim")
 
 class ClaimSource(Base):
@@ -70,7 +70,7 @@ class MediaAsset(Base):
     __tablename__ = "media_assets"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    company_id = Column(UUID(as_uuid=True), ForeignKey("companies.id"))
+    subject_id = Column(UUID(as_uuid=True), ForeignKey("subjects.id"))
     path = Column(String)
     source_url = Column(Text)
     width = Column(Integer)
@@ -79,4 +79,4 @@ class MediaAsset(Base):
     safe_for_use = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    company = relationship("Company", back_populates="media_assets")
+    subject = relationship("Subject", back_populates="media_assets")
